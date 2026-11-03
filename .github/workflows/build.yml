@@ -1,0 +1,85 @@
+name: Build HEXED Samp RPC native libraries
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Find and extract uploaded source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' ! -path './.git/*' | head -n 1)"
+          if [[ -z "${ZIP_FILE}" ]]; then
+            echo "ERROR: Upload your source ZIP to the repository root first." >&2
+            exit 1
+          fi
+          echo "Using source archive: ${ZIP_FILE}"
+          mkdir -p "$RUNNER_TEMP/hexed-source"
+          unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/hexed-source"
+
+          CMAKE_FILE="$(find "$RUNNER_TEMP/hexed-source" -type f -path '*/app/src/main/cpp/CMakeLists.txt' | head -n 1)"
+          if [[ -z "${CMAKE_FILE}" ]]; then
+            echo "ERROR: Could not find app/src/main/cpp/CMakeLists.txt inside the ZIP." >&2
+            echo "Make sure you uploaded the HEXED Samp RPC conversion source ZIP." >&2
+            exit 1
+          fi
+          # CMAKE_FILE is .../PROJECT/app/src/main/cpp/CMakeLists.txt.
+          PROJECT_DIR="$(cd "$(dirname "$CMAKE_FILE")/../../../../" && pwd)"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Found Android project: $PROJECT_DIR"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK and CMake
+        shell: bash
+        run: |
+          sdkmanager --install 'ndk;27.0.12077973' 'cmake;3.22.1'
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Compile native libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle --no-daemon :app:externalNativeBuildDebug
+
+      - name: Package compiled .so files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/native-so
+          find "$PROJECT_DIR/app/build" -type f -name '*.so' -print -exec cp --parents '{}' dist/native-so/ \;
+          if ! find dist/native-so -type f -name 'libsampdiscordrpc.so' | grep -q .; then
+            echo "ERROR: libsampdiscordrpc.so was not generated. Review the build log." >&2
+            exit 1
+          fi
+          echo "Generated shared libraries:"
+          find dist/native-so -type f -name '*.so' -print
+
+      - name: Upload .so artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HEXED-Samp-RPC-native-so
+          path: dist/native-so/
+          if-no-files-found: error
+          retention-days: 14
